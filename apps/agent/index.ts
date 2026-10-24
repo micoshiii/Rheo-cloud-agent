@@ -2,6 +2,7 @@ import type { ChatFunctionTool , ChatMessages , ChatResult , ChatToolCall  } fro
 import { OpenRouter } from "@openrouter/sdk";
 import { resolve } from "node:path" ;
 import { stderr } from "node:process";
+import { readFile } from "node:fs";
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 
@@ -20,8 +21,7 @@ const tools : ChatFunctionTool[] = [
         type: 'function' ,
         function: {
             name: 'bash' ,
-            description:
-            'Run a bash command and return its stdout , stderr and exit code. Use it to explore the filesystem (ls, cat , find , grep , etc).' ,
+            description: 'Run a bash command and return its stdout , stderr and exit code. Use it to explore the filesystem (ls, cat , find , grep , etc).' ,
             parameters: {
                 type: 'object',
                 properties: {
@@ -32,11 +32,36 @@ const tools : ChatFunctionTool[] = [
                 required: ['command'],
             }
         }
+    } ,
+    {
+        type: 'function' ,
+        function: {
+            name: 'read_file' ,
+            description: 'Reads the file at the given path' ,
+            parameters: {
+                type: 'object',
+                properties: {
+                    path: {
+                        type: 'string'
+                    }
+                } ,
+                required: ['path'],
+            }
+        }
     }
 ];
 
 async function runBash(command: string){
     const result = await Bun.$`bash -c ${command}`.nothrow().quiet();
+    return {
+        exitCode: result.exitCode,
+        stdout: result.stdout.toString(),
+        stderr: result.stderr.toString(),
+    };
+}
+
+async function ReadFile(path: string){
+    const result = await Bun.$`cat ${path}`.nothrow().quiet();
     return {
         exitCode: result.exitCode,
         stdout: result.stdout.toString(),
@@ -81,19 +106,50 @@ async function callLLM(messages: ChatMessages[]): Promise<ChatResult> {
 }
 
 async function getToolResponse(toolCall: ChatToolCall) : Promise<ChatMessages> {
-    if(toolCall.function.name !== 'bash') {
-        throw new Error('Unknown tool: ${toolCall.function.name}');
-    }
+    //adding a timeout
+    let resolved = false;
+    return new Promise( async (resolve , reject)=>{
+    let timer = setTimeout(()=>{
+        if(!resolved){
+            console.log("Timeout received")
+            resolve({
+                 role:'tool',
+                 toolCallId: toolCall.id ,
+                 content: JSON.stringify({
+                    stdOut:"Timeout while running the tool"
+                 }) ,
+                 })
+        }
+    } , 5000);
+       if(toolCall.function.name === 'bash'){
+       const { command } = JSON.parse(toolCall.function.arguments) as { command: string };
+       console.log(`Tool: Bash $ ${command}`);
+       const toolResult = await runBash(command);
 
-    const { command } = JSON.parse(toolCall.function.arguments) as { command: string };
-    console.log(`$ ${command}`);
-    const toolResult = await runBash(command);
-
-    return {
+       resolved=true;
+       clearTimeout(timer);
+       resolve({
         role:'tool',
         toolCallId: toolCall.id ,
         content: JSON.stringify(toolResult) ,
-    };
+    });
+    }
+
+  else if(toolCall.function.name === 'read_file'){
+     const { path } = JSON.parse(toolCall.function.arguments) as { path: string };
+     console.log(`Tool: ReadFile ${path}`);
+     const toolResult = await ReadFile(path);
+
+     resolved=true;
+     clearTimeout(timer);
+     resolve({
+        role:'tool',
+        toolCallId: toolCall.id ,
+        content: JSON.stringify(toolResult) ,
+    });
+    }
+
+    })   
 }
 
 const maxIterations = 10;
