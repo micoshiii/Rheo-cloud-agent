@@ -1,8 +1,7 @@
 import type { ChatFunctionTool , ChatMessages , ChatResult , ChatToolCall  } from "@openrouter/sdk/models" ;
 import { OpenRouter } from "@openrouter/sdk";
-import { resolve } from "node:path" ;
-import { stderr } from "node:process";
-import { readFile } from "node:fs";
+import { CommandExitError, Sandbox } from "e2b";
+
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 
@@ -10,11 +9,29 @@ if(!OPENROUTER_API_KEY){
     throw new Error("Set OPENROUTER_API_KEY in apps/agent/.env");
 }
 
+if(!process.env.E2B_API_KEY){
+    throw new Error("Set E2B_API_KEY in apps/agent/.env");
+}
+
 const openRouter = new OpenRouter({
     apiKey : OPENROUTER_API_KEY ,
 });
 
 // const TODO_APP_PATH = resolve(import.meta.dir, '../../')
+
+const REPO_URL= "https://github.com/anuzx/AI_flappy_bird";
+const REPO_PATH="/home/user/rheo-testing"
+
+
+console.log("Starting Sandbox");
+const startTime = Date.now();
+const sandbox = await Sandbox.create();
+
+console.log(`It took ${ (Date.now() - startTime) / 1000 } seconds to start the sandbox`);
+console.log(`Sandbox started: ${sandbox.sandboxId}`);
+
+console.log(`Cloning ${REPO_URL}...`);
+await sandbox.commands.run(`git clone --depth 1 ${REPO_URL} ${REPO_PATH}` , { timeoutMs: 120_000 });
 
 const tools : ChatFunctionTool[] = [
     {
@@ -52,21 +69,34 @@ const tools : ChatFunctionTool[] = [
 ];
 
 async function runBash(command: string){
-    const result = await Bun.$`bash -c ${command}`.nothrow().quiet();
+    try{
+        const result = await sandbox.commands.run(command , { cwd: REPO_PATH });
     return {
         exitCode: result.exitCode,
         stdout: result.stdout.toString(),
         stderr: result.stderr.toString(),
     };
-}
+    }catch(err){
+        // commands.run throws on a non-zero exit code; pass it back to the model as a result
+     if (err instanceof CommandExitError) {
+      return {
+        exitCode: err.exitCode,
+        stdout: err.stdout,
+        stderr: err.stderr,
+            };
+       }
+     throw err;
+     }
+    }
+
 
 async function ReadFile(path: string){
-    const result = await Bun.$`cat ${path}`.nothrow().quiet();
-    return {
-        exitCode: result.exitCode,
-        stdout: result.stdout.toString(),
-        stderr: result.stderr.toString(),
-    };
+   try {
+    const content = await sandbox.files.read(path);
+    return { exitCode: 0, stdout: content, stderr: '' };
+  } catch (err) {
+    return { exitCode: 1, stdout: '', stderr: String(err) };
+  }
 }
 
 const messages: ChatMessages[] = [
@@ -76,7 +106,7 @@ const messages: ChatMessages[] = [
     } ,
     {
         role: 'user' ,
-        content: 'tell me what is inside package.json , use cat command to read the required file'
+        content: `tell me more about the project ${REPO_PATH} , dont make so much efforts just a  basic idea `
     } ,
 ];
 
@@ -152,7 +182,7 @@ async function getToolResponse(toolCall: ChatToolCall) : Promise<ChatMessages> {
     })   
 }
 
-const maxIterations = 10;
+const maxIterations = 100;
 let iterationCount = 0;
 let didReachMaxIterations = true;
 
@@ -182,3 +212,5 @@ if(didReachMaxIterations) {
 }
 
 console.log(messages[messages.length - 1]?.content);
+
+await sandbox.kill();
